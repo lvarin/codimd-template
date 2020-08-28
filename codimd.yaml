@@ -1,0 +1,236 @@
+apiVersion: template.openshift.io/v1
+kind: Template
+labels:
+  template: codimd
+message: codimd template
+metadata:
+  annotations:
+    description: "CodiMD lets you collaborate in real-time with markdown. Built on HackMD source code, CodiMD lets you host and control your team's content with speed and ease."
+    iconClass: "fa fa-newspaper-o"
+    openshift.io/display-name: CodiMD
+    openshift.io/provider-display-name: CSC
+  name: codimd
+objects:
+- apiVersion: v1
+  kind: Route
+  metadata:
+    labels:
+      app: codimd
+    name: codimd
+  spec:
+    port:
+      targetPort: 3000-tcp
+    tls:
+      insecureEdgeTerminationPolicy: Redirect
+      termination: edge
+    to:
+      kind: Service
+      name: codimd
+      weight: 100
+    wildcardPolicy: None
+- apiVersion: v1
+  kind: Service
+  metadata:
+    annotations:
+      openshift.io/generated-by: OpenShiftWebConsole
+    labels:
+      app: codimd
+    name: codimd
+  spec:
+    ports:
+    - name: 3000-tcp
+      port: 3000
+      protocol: TCP
+      targetPort: 3000
+    selector:
+      deploymentconfig: codimd
+    sessionAffinity: None
+    type: ClusterIP
+  status:
+    loadBalancer: {}
+- apiVersion: v1
+  kind: Service
+  metadata:
+    annotations:
+      template.openshift.io/expose-uri: postgres://{.spec.clusterIP}:{.spec.ports[?(.name=="postgresql")].port}
+    name: postgresql
+  spec:
+    ports:
+    - name: postgresql
+      port: 5432
+      protocol: TCP
+      targetPort: 5432
+    selector:
+      name: postgresql
+    sessionAffinity: None
+    type: ClusterIP
+  status:
+    loadBalancer: {}
+- apiVersion: apps.openshift.io/v1
+  kind: DeploymentConfig
+  metadata:
+    labels:
+      app: codimd
+    name: codimd
+  spec:
+    replicas: 1
+    selector:
+      app: codimd
+      deploymentconfig: codimd
+    strategy:
+      activeDeadlineSeconds: 21600
+      resources: {}
+      rollingParams:
+        intervalSeconds: 1
+        maxSurge: 25%
+        maxUnavailable: 25%
+        timeoutSeconds: 600
+        updatePeriodSeconds: 1
+      type: Rolling
+    template:
+      metadata:
+        labels:
+          app: codimd
+          deploymentconfig: codimd
+      spec:
+        containers:
+        - env:
+          - name: CMD_DB_URL
+            value: postgres://codimd:${POSTGRESQL_PASSWORD}@postgresql/sampledb
+          - name: CMD_DEFAULT_PERMISSION
+            value: ${CMD_DEFAULT_PERMISSION}
+          image: hackmdio/hackmd:${CMD_IMAGE_VERSION}
+          name: codimd
+          ports:
+          - containerPort: 3000
+            protocol: TCP
+          resources: {}
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+        dnsPolicy: ClusterFirst
+        restartPolicy: Always
+        schedulerName: default-scheduler
+        securityContext: {}
+        terminationGracePeriodSeconds: 30
+    test: false
+- apiVersion: apps.openshift.io/v1
+  kind: DeploymentConfig
+  metadata:
+    name: postgresql
+  spec:
+    replicas: 1
+    revisionHistoryLimit: 10
+    selector:
+      name: postgresql
+    strategy:
+      activeDeadlineSeconds: 21600
+      recreateParams:
+        timeoutSeconds: 600
+      resources: {}
+      type: Recreate
+    template:
+      metadata:
+        creationTimestamp: null
+        labels:
+          name: postgresql
+      spec:
+        containers:
+        - env:
+          - name: POSTGRESQL_USER
+            valueFrom:
+              secretKeyRef:
+                key: database-user
+                name: postgresql
+          - name: POSTGRESQL_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                key: database-password
+                name: postgresql
+          - name: POSTGRESQL_DATABASE
+            valueFrom:
+              secretKeyRef:
+                key: database-name
+                name: postgresql
+          image: docker-registry.default.svc:5000/openshift/postgresql:10
+          imagePullPolicy: IfNotPresent
+          livenessProbe:
+            exec:
+              command:
+              - /usr/libexec/check-container
+              - --live
+            failureThreshold: 3
+            initialDelaySeconds: 120
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 10
+          name: postgresql
+          ports:
+          - containerPort: 5432
+            protocol: TCP
+          readinessProbe:
+            exec:
+              command:
+              - /usr/libexec/check-container
+            failureThreshold: 3
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 1
+          resources:
+            limits:
+              memory: 512Mi
+          securityContext:
+            capabilities: {}
+            privileged: false
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          volumeMounts:
+          - mountPath: /var/lib/pgsql/data
+            name: postgresql-data
+        dnsPolicy: ClusterFirst
+        restartPolicy: Always
+        schedulerName: default-scheduler
+        securityContext: {}
+        terminationGracePeriodSeconds: 30
+        volumes:
+        - name: postgresql-data
+          persistentVolumeClaim:
+            claimName: postgresql
+    test: false
+- apiVersion: v1
+  kind: PersistentVolumeClaim
+  metadata:
+    name: postgresql
+  spec:
+    accessModes:
+    - ReadWriteOnce
+    resources:
+      requests:
+        storage: 1Gi
+    storageClassName: glusterfs-storage
+- apiVersion: v1
+  kind: Secret
+  metadata:
+    name: postgresql
+    label:
+      app: codimd
+  stringData:
+    database-name: sampledb
+    database-password: ${POSTGRESQL_PASSWORD}
+    database-user: codimd
+  type: Opaque
+
+parameters:
+  - description: "Version of CodiMD's image, See https://hub.docker.com/r/codimdio/codimd/tags"
+    value: 2.2.0
+    displayName: Version
+    name: CMD_IMAGE_VERSION
+  - description: "Defaultpermission for new notes. Options are: freely, editable, limited, locked, protected or private. See https://codimd.io/@codimd/note-permission#Manage-Note-Permission"
+    value: locked
+    displayName: Deault permission level
+    name: CMD_DEFAULT_PERMISSION
+  - description: "Password used for database authentication, if empty a random 25 characters password will be generated."
+    from: '[A-Za-z0-9]{25}'
+    generate: expression
+    displayName: Database password
+    name: POSTGRESQL_PASSWORD
